@@ -4,6 +4,89 @@ const path = require('path');
 const url = require('url');
 const crypto = require('crypto');
 
+// Import the PostgreSQL client. The pg module is added as a dependency
+// in package.json. We use a connection pool to avoid establishing a
+// new connection on every query. The connection string is supplied via
+// the environment variable DATABASE_URL which is configured in the
+// Render service settings. SSL is enabled but certificate validation
+// is skipped because Render's internal certificate is self‑signed.
+const { Pool } = require('pg');
+
+// Create a connection pool only if a DATABASE_URL is provided. When
+// running locally without a database (e.g. during development) the
+// pool will be undefined and the application will continue to use the
+// JSON file for persistence.
+let pool;
+if (process.env.DATABASE_URL) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    // Render provides self‑signed certificates on the internal network.
+    ssl: { rejectUnauthorized: false }
+  });
+}
+
+/**
+ * Initialise the database by ensuring the app_data table exists and
+ * synchronising the JSON file with the database contents. If the table
+ * already contains a row, its JSON payload is written to data.json so
+ * that subsequent synchronous reads operate on the same state. If the
+ * table is empty, the current contents of data.json (or the default
+ * structure) are inserted as the initial row.
+ */
+async function initializeDatabase() {
+  if (!pool) {
+    // No database configured; nothing to initialise.
+    return;
+  }
+  const client = await pool.connect();
+  try {
+    // Create the table if it doesn't exist. The id column uses a
+    // constant 1 so that we can upsert the single row on every write.
+    await client.query(
+      `CREATE TABLE IF NOT EXISTS app_data (
+        id INTEGER PRIMARY KEY,
+        data JSONB NOT NULL
+      )`
+    );
+    // Attempt to fetch the row. If present, use its data as the
+    // canonical application state.
+    const res = await client.query('SELECT data FROM app_data WHERE id = 1');
+    let dbData;
+    if (res.rows && res.rows.length > 0) {
+      dbData = res.rows[0].data;
+      // Write the database state back to the JSON file so that
+      // synchronous reads return the same data.
+      fs.writeFileSync(DATA_FILE, JSON.stringify(dbData, null, 2));
+    } else {
+      // If no row exists, initialise the table using the current
+      // contents of the JSON file (or the default structure).
+      const fileData = readData();
+      await client.query('INSERT INTO app_data (id, data) VALUES (1, $1)', [fileData]);
+      dbData = fileData;
+    }
+  } catch (err) {
+    console.error('Error initialising database:', err);
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Persist the application state to the database. This function is
+ * asynchronous but returns void; callers should not await it because
+ * writes occur frequently and the main control flow is synchronous.
+ * When the pool is undefined (no DATABASE_URL), the function does
+ * nothing. The upsert pattern replaces the existing row with id=1.
+ */
+function persistToDatabase(data) {
+  if (!pool) return;
+  pool
+    .query('INSERT INTO app_data (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data', [data])
+    .catch(err => {
+      console.error('Failed to persist data to database:', err);
+    });
+}
+
 /*
  * This server implements a simple appointment booking system for two types of
  * users: buyers and sellers.  Buyers and sellers can register accounts,
@@ -71,6 +154,9 @@ function readData() {
  */
 function writeData(data) {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  // Also persist to Postgres in the background. The asynchronous
+  // operation is not awaited to avoid blocking the request cycle.
+  persistToDatabase(data);
 }
 
 /**
@@ -913,9 +999,17 @@ const server = http.createServer(handleRequest);
 // testing scenarios without automatically starting the server.
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
-  server.listen(PORT, () => {
-    console.log(`Server started on http://localhost:${PORT}`);
-  });
+  // When starting the server directly, initialise the database first.
+  (async () => {
+    try {
+      await initializeDatabase();
+    } catch (err) {
+      console.error('Database initialisation failed:', err);
+    }
+    server.listen(PORT, () => {
+      console.log(`Server started on http://localhost:${PORT}`);
+    });
+  })();
 }
 
 module.exports = server;
