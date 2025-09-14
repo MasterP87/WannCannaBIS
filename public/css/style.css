@@ -18,3 +18,20 @@ form{display:grid;gap:.9rem}label{font-weight:600;color:var(--muted)}input,selec
 .container a:hover, header nav a:hover{filter:brightness(1.03)}
 .brand img.logo{width:32px;height:32px;object-fit:contain;border-radius:6px}.brand-name{font-weight:800;letter-spacing:.2px}
 @media(max-width:600px){.container{margin:.75rem .75rem;padding:1rem}}
+/* Responsive adjustments for mobile devices */
+@media (max-width: 600px) {
+  /* Stack header elements and left-align on small screens */
+  header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  /* Make navigation links full width and add spacing */
+  header nav a {
+    margin-left: 0;
+    margin-top: 0.5rem;
+    width: 100%;
+  }
+  /* Ensure two-column grids collapse to a single column on small screens */
+  .grid-cols-2 {
+    grid-template-columns: 1fr !important;
+ }
